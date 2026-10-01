@@ -1,0 +1,124 @@
+/**
+ * Google Apps Script: Generador de Constancias Justificadas
+ * Descripción: Crea documentos de constancia a partir de una plantilla,
+ * formatea el texto (negritas, justificado), los organiza en subcarpetas
+ * por carrera y finalmente los convierte a PDF.
+ */
+
+// --- CONFIGURACIÓN (REEMPLAZAR CON TUS PROPIOS IDs) ---
+const SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID_HERE';
+const TEMPLATE_ID = 'YOUR_TEMPLATE_DOC_ID_HERE';
+const FOLDER_DESTINO_ID = 'YOUR_DRIVE_FOLDER_ID_HERE';
+
+function generarConstanciasEstandarizadas() {
+  // Conectar con la hoja de cálculo
+  const sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName('NOMBRE_DE_TU_HOJA'); // Reemplazar con el nombre de tu pestaña
+  const data = sheet.getDataRange().getValues();
+  
+  // Conectar con la carpeta de destino en Drive
+  const folderPadre = DriveApp.getFolderById(FOLDER_DESTINO_ID);
+  
+  // 1. Crear carpeta principal definitiva con el nuevo nombre
+  const nombreCarpetaPrincipal = "Constancias Generadas - Fecha/Evento"; // Personalizar nombre
+  const carpetas = folderPadre.getFoldersByName(nombreCarpetaPrincipal);
+  const carpetaPrincipal = carpetas.hasNext() ? carpetas.next() : folderPadre.createFolder(nombreCarpetaPrincipal);
+  
+  // Función para normalizar y extraer el nombre corto de la especialidad/carrera
+  function obtenerEspecialidad(especialidadOriginal) {
+    const espUpper = especialidadOriginal.toString().toUpperCase();
+    if (espUpper.includes("ESPECIALIDAD_1")) return "NOMBRE_CORTO_1";
+    if (espUpper.includes("ESPECIALIDAD_2")) return "NOMBRE_CORTO_2"; 
+    // Agregar más condiciones según sea necesario
+    return espUpper;
+  }
+
+  // Función para reemplazar un texto, limpiarle el formato y forzar a negrita SOLO el texto insertado
+  function reemplazarYForzarNegrita(body, textoBuscar, textoReemplazar) {
+    let elemento = body.findText(textoBuscar);
+    while (elemento) {
+      let inicio = elemento.getStartOffset();
+      let textoElemento = elemento.getElement().asText();
+      
+      // Reemplazar el texto
+      textoElemento.replaceText(textoBuscar, textoReemplazar);
+      
+      // Poner en negrita exactamente la longitud del texto reemplazado
+      let fin = inicio + textoReemplazar.length - 1; 
+      textoElemento.setBold(inicio, fin, true);
+      
+      // Buscar la siguiente coincidencia por si hay más de una
+      elemento = body.findText(textoBuscar, elemento);
+    }
+  }
+  
+  let constanciasGeneradas = 0; // Contador total
+  
+  // 2. Iterar sobre todas las filas de la base de datos
+  for (let i = 1; i < data.length; i++) {
+    let fila = data[i];
+    let fechaFiltro = fila[10]; // Ajustar índice de columna (K)
+    
+    // Filtrar por condición específica (ej. fecha del evento)
+    if (fechaFiltro && fechaFiltro.toString().toLowerCase().includes('condicion_de_filtrado')) {
+      
+      let nombreCompleto = fila[1].toString().toUpperCase(); // Ajustar índice (B)
+      let identificacion = fila[2].toString(); // Ajustar índice (C)
+      let especialidadCompleta = fila[4].toString(); // Ajustar índice (E)
+      let especialidadCorta = obtenerEspecialidad(especialidadCompleta); 
+      
+      // Crear subcarpeta por especialidad si no existe
+      let subcarpetas = carpetaPrincipal.getFoldersByName(especialidadCorta);
+      let subcarpeta = subcarpetas.hasNext() ? subcarpetas.next() : carpetaPrincipal.createFolder(especialidadCorta);
+      
+      // Crear carpeta "PDF" dentro de la subcarpeta
+      let carpetasPDF = subcarpeta.getFoldersByName("PDF");
+      let carpetaDestinoPDF = carpetasPDF.hasNext() ? carpetasPDF.next() : subcarpeta.createFolder("PDF");
+      
+      // 3. Crear una copia de la plantilla para el usuario
+      let templateFile = DriveApp.getFileById(TEMPLATE_ID);
+      let nuevoDocFile = templateFile.makeCopy(nombreCompleto, subcarpeta);
+      let nuevoDoc = DocumentApp.openById(nuevoDocFile.getId());
+      let body = nuevoDoc.getBody();
+      
+      // --- FORZAR ALINEACIÓN JUSTIFICADA ---
+      let parrafoInicio = body.findText("Texto_de_inicio_parrafo_1"); // Ajustar texto a buscar
+      if (parrafoInicio) {
+        parrafoInicio.getElement().getParent().asParagraph().setAlignment(DocumentApp.HorizontalAlignment.JUSTIFY);
+      }
+      let parrafoFin = body.findText("Texto_de_inicio_parrafo_2"); // Ajustar texto a buscar
+      if (parrafoFin) {
+        parrafoFin.getElement().getParent().asParagraph().setAlignment(DocumentApp.HorizontalAlignment.JUSTIFY);
+      }
+
+      // 4. Reemplazar Nombre principal y forzar a negrita
+      reemplazarYForzarNegrita(body, "\\(PLACEHOLDER_NOMBRE\\)", nombreCompleto);
+      
+      // 5. Reemplazar ID y forzar a negrita
+      reemplazarYForzarNegrita(body, "\\(PLACEHOLDER_ID\\)", identificacion);
+      
+      // 6. Reemplazar Especialidad y forzar a negrita
+      reemplazarYForzarNegrita(body, "\\(PLACEHOLDER_ESPECIALIDAD\\)", especialidadCorta);
+      
+      // 7. Firma del usuario
+      let firmaMatch = body.findText("Nombre:\\s*_+"); // Ajustar regex según la plantilla
+      if(firmaMatch) {
+         firmaMatch.getElement().asText().replaceText("Nombre:\\s*_+", "Nombre: (PLACEHOLDER_FIRMA)");
+         reemplazarYForzarNegrita(body, "\\(PLACEHOLDER_FIRMA\\)", nombreCompleto);
+      }
+
+      // Guardar y cerrar el documento de Docs para que los cambios se apliquen ANTES del PDF
+      nuevoDoc.saveAndClose();
+      
+      // 8. GENERAR Y GUARDAR EL PDF
+      Utilities.sleep(1000); // Pausa para permitir que los servidores de Google guarden los cambios
+      let docTerminado = DriveApp.getFileById(nuevoDocFile.getId());
+      let pdfBlob = docTerminado.getAs(MimeType.PDF);
+      carpetaDestinoPDF.createFile(pdfBlob).setName(nombreCompleto + ".pdf");
+      
+      constanciasGeneradas++;
+    }
+  }
+  
+  // 9. Mensaje final con el total
+  SpreadsheetApp.getUi().alert('¡Proceso finalizado! Se generaron ' + constanciasGeneradas + ' constancias.');
+}
